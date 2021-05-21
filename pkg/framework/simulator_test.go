@@ -103,6 +103,40 @@ func getGeneralNode(nodeName string) *v1.Node {
 	}
 }
 
+func getSimulatedPod() *v1.Pod {
+	grace := int64(30)
+	simulatedPod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "simulated-pod", Namespace: "test-node-3", ResourceVersion: "10"},
+		Spec: v1.PodSpec{
+			RestartPolicy:                 v1.RestartPolicyAlways,
+			DNSPolicy:                     v1.DNSClusterFirst,
+			TerminationGracePeriodSeconds: &grace,
+			SecurityContext:               &v1.PodSecurityContext{},
+		},
+	}
+
+	limitResourceList := make(map[v1.ResourceName]resource.Quantity)
+	requestsResourceList := make(map[v1.ResourceName]resource.Quantity)
+
+	limitResourceList[v1.ResourceCPU] = *resource.NewMilliQuantity(100, resource.DecimalSI)
+	limitResourceList[v1.ResourceMemory] = *resource.NewQuantity(5e6, resource.BinarySI)
+	limitResourceList[ResourceNvidiaGPU] = *resource.NewQuantity(0, resource.DecimalSI)
+	requestsResourceList[v1.ResourceCPU] = *resource.NewMilliQuantity(100, resource.DecimalSI)
+	requestsResourceList[v1.ResourceMemory] = *resource.NewQuantity(5e6, resource.BinarySI)
+	requestsResourceList[ResourceNvidiaGPU] = *resource.NewQuantity(0, resource.DecimalSI)
+
+	// set pod's resource consumption
+	simulatedPod.Spec.Containers = []v1.Container{
+		{
+			Resources: v1.ResourceRequirements{
+				Limits:   limitResourceList,
+				Requests: requestsResourceList,
+			},
+		},
+	}
+	return simulatedPod
+}
+
 func setupNodes() []*v1.Node {
 	// - create three nodes, each node with different resources (cpu, memory)
 
@@ -157,64 +191,38 @@ func setupNodes() []*v1.Node {
 func TestPrediction(t *testing.T) {
 
 	tests := []struct {
-		name     string
-		failType string
-		limit    int
-		nodes    []*v1.Node
+		name         string
+		failType     string
+		expectedPods int
+		limit        int
+		nodes        []*v1.Node
+		simulatedPod *v1.Pod
 	}{
 		{
-			name:     "Limit reached fail type",
-			failType: "LimitReached",
-			limit:    6,
-			nodes:    setupNodes(),
+			name:         "Limit reached fail type",
+			failType:     "LimitReached",
+			expectedPods: 6,
+			limit:        6,
+			nodes:        setupNodes(),
+			simulatedPod: getSimulatedPod(),
 		},
 		{
-			name:     "insufficient resources fail type",
-			failType: "Unschedulable",
-			limit:    0,
-			nodes:    setupNodes(),
+			name:         "insufficient resources fail type",
+			failType:     "Unschedulable",
+			expectedPods: 9,
+			limit:        0,
+			nodes:        setupNodes(),
+			simulatedPod: getSimulatedPod(),
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			// 1. create fake storage with initial data
-			grace := int64(30)
-			simulatedPod := &v1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Name: "simulated-pod", Namespace: "test-node-3", ResourceVersion: "10"},
-				Spec: v1.PodSpec{
-					RestartPolicy:                 v1.RestartPolicyAlways,
-					DNSPolicy:                     v1.DNSClusterFirst,
-					TerminationGracePeriodSeconds: &grace,
-					SecurityContext:               &v1.PodSecurityContext{},
-				},
-			}
-
-			limitResourceList := make(map[v1.ResourceName]resource.Quantity)
-			requestsResourceList := make(map[v1.ResourceName]resource.Quantity)
-
-			limitResourceList[v1.ResourceCPU] = *resource.NewMilliQuantity(100, resource.DecimalSI)
-			limitResourceList[v1.ResourceMemory] = *resource.NewQuantity(5e6, resource.BinarySI)
-			limitResourceList[ResourceNvidiaGPU] = *resource.NewQuantity(0, resource.DecimalSI)
-			requestsResourceList[v1.ResourceCPU] = *resource.NewMilliQuantity(100, resource.DecimalSI)
-			requestsResourceList[v1.ResourceMemory] = *resource.NewQuantity(5e6, resource.BinarySI)
-			requestsResourceList[ResourceNvidiaGPU] = *resource.NewQuantity(0, resource.DecimalSI)
-
 			var objs []runtime.Object
 			for _, node := range test.nodes {
 				objs = append(objs, node)
 			}
 			client := fakeclientset.NewSimpleClientset(objs...)
-
-			// set pod's resource consumption
-			simulatedPod.Spec.Containers = []v1.Container{
-				{
-					Resources: v1.ResourceRequirements{
-						Limits:   limitResourceList,
-						Requests: requestsResourceList,
-					},
-				},
-			}
 
 			// 2. create predictor
 			// - create simple configuration file for scheduler (use the default values or from systemd env file if reasonable)
@@ -255,7 +263,7 @@ func TestPrediction(t *testing.T) {
 			}
 
 			cc, err := New(kubeSchedulerConfig,
-				simulatedPod,
+				test.simulatedPod,
 				test.limit,
 			)
 
@@ -272,8 +280,8 @@ func TestPrediction(t *testing.T) {
 			}
 
 			// TODO: modify when sequence is implemented
-			for reason, replicas := range cc.Report().Status.Pods[0].ReplicasOnNodes {
-				t.Logf("Reason: %v, instances: %v\n", reason, replicas)
+			for _, onNode := range cc.Report().Status.Pods[0].ReplicasOnNodes {
+				t.Logf("Node: %s, instances: %v\n", onNode.NodeName, onNode.Replicas)
 			}
 
 			t.Logf("Stop reason: %v\n", cc.Report().Status.FailReason)
@@ -281,6 +289,14 @@ func TestPrediction(t *testing.T) {
 			//4. check expected number of pods is scheduled and reflected in the resource storage
 			if cc.Report().Status.FailReason.FailType != test.failType {
 				t.Errorf("Unexpected stop reason occured: %v, expecting: %v", cc.Report().Status.FailReason.FailType, test.failType)
+			}
+
+			actualPods := 0
+			for _,v := range cc.Report().Status.Pods[0].ReplicasOnNodes {
+				actualPods += v.Replicas
+			}
+			if actualPods != test.expectedPods {
+				t.Errorf("Unexpected number of pods scheduled: %v, expecting: %v", actualPods, test.expectedPods)
 			}
 
 			cc.Close()
