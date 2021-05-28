@@ -45,7 +45,7 @@ import (
 
 var (
 	clusterCapacityLong = dedent.Dedent(`
-		Cluster-capacity simulates an API server with initial state copied from the Kubernetes enviroment
+		Cluster-capacity simulates an API server with initial state copied from the Kubernetes environment
 		with its configuration specified in KUBECONFIG. The simulated API server tries to schedule the number of
 		pods specified by --max-limits flag. If the --max-limits flag is not specified, pods are scheduled until
 		the simulated API server runs out of resources.
@@ -55,7 +55,7 @@ var (
 func NewClusterCapacityCommand() *cobra.Command {
 	opt := options.NewClusterCapacityOptions()
 	cmd := &cobra.Command{
-		Use:   "cluster-capacity --kubeconfig KUBECONFIG --podspec PODSPEC",
+		Use:   "cluster-capacity --kubeconfig KUBECONFIG [--podspec PODSPEC|--podspeclist PODSPECLIST]",
 		Short: "Cluster-capacity is used for simulating scheduling of one or multiple pods",
 		Long:  clusterCapacityLong,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -81,8 +81,8 @@ func NewClusterCapacityCommand() *cobra.Command {
 }
 
 func Validate(opt *options.ClusterCapacityOptions) error {
-	if len(opt.PodSpecFile) == 0 {
-		return fmt.Errorf("Pod spec file is missing")
+	if (len(opt.PodSpecFile) == 0) == (len(opt.PodListSpecFile) == 0) {
+		return fmt.Errorf("either a pod spec or pod list file must be specified")
 	}
 
 	_, present := os.LookupEnv("CC_INCLUSTER")

@@ -58,13 +58,15 @@ type ClusterCapacity struct {
 	schedulers           map[string]*scheduler.Scheduler
 	defaultSchedulerName string
 	defaultSchedulerConf *schedconfig.CompletedConfig
-	// pod to schedule
-	simulatedPod     *v1.Pod
-	lastSimulatedPod *v1.Pod
-	maxSimulated     int
-	simulated        int
-	status           Status
-	report           *ClusterCapacityReview
+	// pod list to schedule
+	simulatedPod           *v1.PodList
+	// idx into the list
+	idxToNextPodToSimulate int
+	lastSimulatedPod       *v1.Pod
+	maxSimulated           int
+	simulated              int
+	status                 Status
+	report                 *ClusterCapacityReview
 
 	// analysis limitation
 	informerStopCh chan struct{}
@@ -81,15 +83,20 @@ type ClusterCapacity struct {
 
 // capture all scheduled pods with reason why the analysis could not continue
 type Status struct {
-	Pods       []*v1.Pod
-	StopReason string
+	ScheduledPodSequences int
+	Pods                  []*v1.Pod
+	StopReason            string
 }
 
 func (c *ClusterCapacity) Report() *ClusterCapacityReview {
 	if c.report == nil {
 		// Preparation before pod sequence scheduling is done
 		pods := make([]*v1.Pod, 0)
-		pods = append(pods, c.simulatedPod)
+
+		for _, simulatedPod := range c.simulatedPod.Items {
+			p := simulatedPod
+			pods = append(pods, &p)
+		}
 		c.report = GetReport(pods, c.status)
 		c.report.Spec.Replicas = int32(c.maxSimulated)
 	}
@@ -209,13 +216,19 @@ func (c *ClusterCapacity) Bind(ctx context.Context, state *framework.CycleState,
 	updatedPod := pod.DeepCopy()
 	updatedPod.Spec.NodeName = nodeName
 	updatedPod.Status.Phase = v1.PodRunning
+	// TODO (kwall) feo... need nicer way to signal a the whole sequence of pods has been simulated.
+	if c.idxToNextPodToSimulate == 0 {
+		c.simulated++
+	}
 
 	// TODO(jchaloup): rename Add to Update as this actually updates the scheduled pod
 	if err := c.strategy.Add(updatedPod); err != nil {
 		return framework.NewStatus(framework.Error, fmt.Sprintf("Unable to recompute new cluster state: %v", err))
 	}
 
+	// TODO(kwall) group this somehow?
 	c.status.Pods = append(c.status.Pods, updatedPod)
+	c.status.ScheduledPodSequences = c.simulated
 
 	if c.maxSimulated > 0 && c.simulated >= c.maxSimulated {
 		c.status.StopReason = fmt.Sprintf("LimitReached: Maximum number of pods simulated: %v", c.maxSimulated)
@@ -262,12 +275,16 @@ func (c *ClusterCapacity) Update(pod *v1.Pod, podCondition *v1.PodCondition, sch
 }
 
 func (c *ClusterCapacity) nextPod() error {
+	var err error
+	simulatedPod := c.simulatedPod.Items[c.idxToNextPodToSimulate]
+	c.idxToNextPodToSimulate = (c.idxToNextPodToSimulate + 1) % len(c.simulatedPod.Items)
+
 	pod := v1.Pod{}
-	pod = *c.simulatedPod.DeepCopy()
+	pod = *simulatedPod.DeepCopy()
 	// reset any node designation set
 	pod.Spec.NodeName = ""
 	// use simulated pod name with an index to construct the name
-	pod.ObjectMeta.Name = fmt.Sprintf("%v-%v", c.simulatedPod.Name, c.simulated)
+	pod.ObjectMeta.Name = fmt.Sprintf("%v-%v", pod.Name, c.simulated)
 	pod.ObjectMeta.UID = types.UID(uuid.NewV4().String())
 	pod.Spec.SchedulerName = c.defaultSchedulerName
 
@@ -279,10 +296,9 @@ func (c *ClusterCapacity) nextPod() error {
 	// Stores the scheduler name
 	pod.ObjectMeta.Annotations[podProvisioner] = c.defaultSchedulerName
 
-	c.simulated++
 	c.lastSimulatedPod = &pod
 
-	_, err := c.externalkubeclient.CoreV1().Pods(pod.Namespace).Create(context.TODO(), &pod, metav1.CreateOptions{})
+	_, err = c.externalkubeclient.CoreV1().Pods(pod.Namespace).Create(context.TODO(), &pod, metav1.CreateOptions{})
 	return err
 }
 
@@ -402,7 +418,7 @@ func getRecorderFactory(cc *schedconfig.CompletedConfig) profile.RecorderFactory
 // Create new cluster capacity analysis
 // The analysis is completely independent of apiserver so no need
 // for kubeconfig nor for apiserver url
-func New(kubeSchedulerConfig *schedconfig.CompletedConfig, simulatedPod *v1.Pod, maxPods int) (*ClusterCapacity, error) {
+func New(kubeSchedulerConfig *schedconfig.CompletedConfig, simulatedPod *v1.PodList, maxSimulated int) (*ClusterCapacity, error) {
 	client := fakeclientset.NewSimpleClientset()
 	sharedInformerFactory := informers.NewSharedInformerFactory(client, 0)
 
@@ -413,7 +429,7 @@ func New(kubeSchedulerConfig *schedconfig.CompletedConfig, simulatedPod *v1.Pod,
 		externalkubeclient: client,
 		simulatedPod:       simulatedPod,
 		simulated:          0,
-		maxSimulated:       maxPods,
+		maxSimulated:       maxSimulated,
 		stop:               make(chan struct{}),
 		informerFactory:    sharedInformerFactory,
 		informerStopCh:     make(chan struct{}),

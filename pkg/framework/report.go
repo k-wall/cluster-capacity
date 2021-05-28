@@ -60,7 +60,10 @@ type ClusterCapacityReviewStatus struct {
 	FailReason *ClusterCapacityReviewScheduleFailReason `json:"failReason"`
 
 	// per node information about the scheduling simulation
-	Pods []*ClusterCapacityReviewResult `json:"pods"`
+	Pods      []*ClusterCapacityReviewResult `json:"pods"`
+
+	// actual number of pod sequences that are scheduled
+	ScheduledPodSequences int32 `json:"ScheduledPodSequences"`
 }
 
 type ClusterCapacityReviewResult struct {
@@ -210,10 +213,11 @@ func getReviewSpec(podTemplates []*v1.Pod) ClusterCapacityReviewSpec {
 
 func getReviewStatus(pods []*v1.Pod, status Status) ClusterCapacityReviewStatus {
 	return ClusterCapacityReviewStatus{
-		CreationTimestamp: time.Now(),
-		Replicas:          int32(len(status.Pods)),
-		FailReason:        getMainFailReason(status.StopReason),
-		Pods:              parsePodsReview(pods, status),
+		CreationTimestamp:     time.Now(),
+		Replicas:              int32(len(status.Pods)),
+		FailReason:            getMainFailReason(status.StopReason),
+		Pods:                  parsePodsReview(pods, status),
+		ScheduledPodSequences: int32(status.ScheduledPodSequences),
 	}
 }
 
@@ -250,6 +254,10 @@ func clusterCapacityReviewPrettyPrint(r *ClusterCapacityReview, verbose bool) {
 			}
 			fmt.Printf("\n")
 		}
+	}
+
+	if verbose {
+		fmt.Printf("The cluster can schedule %v complete pod sequences.\n", r.Status.ScheduledPodSequences)
 	}
 
 	for _, pod := range r.Status.Pods {

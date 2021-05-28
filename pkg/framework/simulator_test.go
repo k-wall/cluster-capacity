@@ -18,6 +18,7 @@ package framework
 
 import (
 	"fmt"
+	"reflect"
 	goruntime "runtime"
 	"testing"
 
@@ -103,10 +104,10 @@ func getGeneralNode(nodeName string) *v1.Node {
 	}
 }
 
-func getSimulatedPod() *v1.Pod {
+func getSimulatedPod(name, namespace string) v1.Pod {
 	grace := int64(30)
-	simulatedPod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "simulated-pod", Namespace: "test-node-3", ResourceVersion: "10"},
+	simulatedPod := v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, ResourceVersion: "10"},
 		Spec: v1.PodSpec{
 			RestartPolicy:                 v1.RestartPolicyAlways,
 			DNSPolicy:                     v1.DNSClusterFirst,
@@ -191,28 +192,53 @@ func setupNodes() []*v1.Node {
 func TestPrediction(t *testing.T) {
 
 	tests := []struct {
-		name         string
-		failType     string
-		expectedPods int
-		limit        int
-		nodes        []*v1.Node
-		simulatedPod *v1.Pod
+		name                string
+		failType            string
+		expectedPodReplicas []int
+		expectedSimulated   int
+		limit               int
+		nodes               []*v1.Node
+		simulatedPod        *v1.PodList
 	}{
 		{
-			name:         "Limit reached fail type",
-			failType:     "LimitReached",
-			expectedPods: 6,
-			limit:        6,
-			nodes:        setupNodes(),
-			simulatedPod: getSimulatedPod(),
+			name:                "Limit reached fail type",
+			failType:            "LimitReached",
+			expectedPodReplicas: []int{6},
+			expectedSimulated:   6,
+			limit:               6,
+			nodes:               setupNodes(),
+			simulatedPod: &v1.PodList{
+				Items: []v1.Pod{
+					getSimulatedPod("simulated-pod", "test-node-3"),
+				},
+			},
 		},
 		{
-			name:         "insufficient resources fail type",
-			failType:     "Unschedulable",
-			expectedPods: 9,
-			limit:        0,
-			nodes:        setupNodes(),
-			simulatedPod: getSimulatedPod(),
+			name:                "insufficient resources fail type",
+			failType:            "Unschedulable",
+			expectedPodReplicas: []int{9},
+			expectedSimulated:   9,
+			limit:               0,
+			nodes:               setupNodes(),
+			simulatedPod: &v1.PodList{
+				Items: []v1.Pod{
+					getSimulatedPod("simulated-pod", "test-node-3"),
+				},
+			},
+		},
+		{
+			name:                "list of pods",
+			failType:            "Unschedulable",
+			expectedPodReplicas: []int{5, 4},
+			expectedSimulated:   4,
+			limit:               0,
+			nodes:               setupNodes(),
+			simulatedPod: &v1.PodList{
+				Items: []v1.Pod{
+					getSimulatedPod("simulated-pod1", "test-node-3"),
+					getSimulatedPod("simulated-pod2", "test-node-3"),
+				},
+			},
 		},
 	}
 
@@ -279,24 +305,30 @@ func TestPrediction(t *testing.T) {
 				t.Errorf("Unable to run analysis: %v", err)
 			}
 
-			// TODO: modify when sequence is implemented
-			for _, onNode := range cc.Report().Status.Pods[0].ReplicasOnNodes {
-				t.Logf("Node: %s, instances: %v\n", onNode.NodeName, onNode.Replicas)
+			reviewStatus := cc.Report().Status
+			actualPods := make([]int, 0)
+			for _, pod := range reviewStatus.Pods {
+				total := 0
+				for _, onNode := range pod.ReplicasOnNodes {
+					t.Logf("Pod: %s Node: %s, instances: %v\n", pod.PodName, onNode.NodeName, onNode.Replicas)
+					 total += onNode.Replicas
+				}
+				actualPods = append(actualPods, total)
 			}
 
-			t.Logf("Stop reason: %v\n", cc.Report().Status.FailReason)
+			t.Logf("Stop reason: %v\n", reviewStatus.FailReason)
 			// time.Sleep(5 * time.Second)
 			//4. check expected number of pods is scheduled and reflected in the resource storage
-			if cc.Report().Status.FailReason.FailType != test.failType {
-				t.Errorf("Unexpected stop reason occured: %v, expecting: %v", cc.Report().Status.FailReason.FailType, test.failType)
+			if reviewStatus.FailReason.FailType != test.failType {
+				t.Errorf("Unexpected stop reason occured: %v, expecting: %v", reviewStatus.FailReason.FailType, test.failType)
 			}
 
-			actualPods := 0
-			for _,v := range cc.Report().Status.Pods[0].ReplicasOnNodes {
-				actualPods += v.Replicas
+			if !reflect.DeepEqual(actualPods, test.expectedPodReplicas) {
+				t.Errorf("unexpected number of pods scheduled: %v, expecting: %v", actualPods, test.expectedPodReplicas)
 			}
-			if actualPods != test.expectedPods {
-				t.Errorf("Unexpected number of pods scheduled: %v, expecting: %v", actualPods, test.expectedPods)
+
+			if cc.simulated != test.expectedSimulated {
+				t.Errorf("unexpected number of complete pod list schedule: %v, expecting: %v",  cc.simulated, test.expectedSimulated)
 			}
 
 			cc.Close()
