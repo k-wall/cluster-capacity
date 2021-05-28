@@ -303,7 +303,6 @@ Underway:
 Would like to get soon:
 
 * include multiple schedulers
-* accept a list (sequence) of pods
 * extend analysis with volume handling
 * define common interface each scheduler need to implement if embedded in the framework
 

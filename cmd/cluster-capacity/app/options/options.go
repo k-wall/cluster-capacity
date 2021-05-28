@@ -64,7 +64,7 @@ func (s *ClusterCapacityOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&s.Kubeconfig, "kubeconfig", s.Kubeconfig, "Path to the kubeconfig file to use for the analysis.")
 	fs.StringVar(&s.PodSpecFile, "podspec", s.PodSpecFile, "Path to JSON or YAML file containing pod definition.")
 	fs.StringVar(&s.PodListSpecFile, "podspeclist", s.PodListSpecFile, "Path to JSON or YAML file containing pod definitions.")
-	fs.IntVar(&s.MaxLimit, "max-limit", 0, "Number of instances of pod to be scheduled after which analysis stops. By default unlimited.")
+	fs.IntVar(&s.MaxLimit, "max-limit", 0, "Number of instances of pod/pod list to be scheduled after which analysis stops. By default unlimited.")
 
 	//TODO(jchaloup): uncomment this line once the multi-schedulers are fully implemented
 	//fs.StringArrayVar(&s.SchedulerConfigFile, "config", s.SchedulerConfigFile, "Paths to files containing scheduler configuration in JSON or YAML format")
